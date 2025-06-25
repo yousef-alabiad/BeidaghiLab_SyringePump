@@ -29,6 +29,14 @@ class PumpWindow:
         # Message queue for this pump
         self.message_queue = queue.Queue()
         
+        # Real-time data storage
+        self.current_progress = 0.0
+        self.dispensed_volume = 0.0
+        self.remaining_volume = 0.0
+        self.elapsed_time = 0.0
+        self.estimated_remaining_time = 0.0
+        self.current_speed = 0.0
+        
         # Create pump window
         self.create_window()
         
@@ -127,15 +135,49 @@ class PumpWindow:
         self.status_btn.pack(side="left", padx=5)
         
         # Progress Frame
-        progress_frame = ttk.LabelFrame(main_frame, text="Progress", padding=10)
+        progress_frame = ttk.LabelFrame(main_frame, text="Real-Time Progress", padding=10)
         progress_frame.pack(fill="x", pady=5)
         
+        # Progress bar and percentage
+        progress_header_frame = ttk.Frame(progress_frame)
+        progress_header_frame.pack(fill="x", pady=5)
+        
         self.progress_var = tk.StringVar(value="Ready")
-        progress_label = ttk.Label(progress_frame, textvariable=self.progress_var)
-        progress_label.pack(anchor="w", pady=5)
+        progress_label = ttk.Label(progress_header_frame, textvariable=self.progress_var, 
+                                  font=("Arial", 10, "bold"))
+        progress_label.pack(anchor="w")
         
         self.progress_bar = ttk.Progressbar(progress_frame, length=400, mode='determinate')
         self.progress_bar.pack(fill="x", pady=5)
+        
+        # Detailed progress information
+        details_frame = ttk.Frame(progress_frame)
+        details_frame.pack(fill="x", pady=5)
+        
+        # Volume information
+        volume_frame = ttk.LabelFrame(details_frame, text="Volume", padding=5)
+        volume_frame.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        self.dispensed_var = tk.StringVar(value="Dispensed: 0.00 mL")
+        self.remaining_var = tk.StringVar(value="Remaining: 0.00 mL")
+        ttk.Label(volume_frame, textvariable=self.dispensed_var).pack(anchor="w")
+        ttk.Label(volume_frame, textvariable=self.remaining_var).pack(anchor="w")
+        
+        # Time information
+        time_frame = ttk.LabelFrame(details_frame, text="Time", padding=5)
+        time_frame.pack(side="left", fill="x", expand=True, padx=5)
+        
+        self.elapsed_var = tk.StringVar(value="Elapsed: 0.0 min")
+        self.remaining_time_var = tk.StringVar(value="ETA: 0.0 min")
+        ttk.Label(time_frame, textvariable=self.elapsed_var).pack(anchor="w")
+        ttk.Label(time_frame, textvariable=self.remaining_time_var).pack(anchor="w")
+        
+        # Speed information
+        speed_frame = ttk.LabelFrame(details_frame, text="Speed", padding=5)
+        speed_frame.pack(side="left", fill="x", expand=True, padx=(5, 0))
+        
+        self.speed_var = tk.StringVar(value="Current: 0.0 mL/min")
+        ttk.Label(speed_frame, textvariable=self.speed_var).pack(anchor="w")
         
         # Log Frame
         log_frame = ttk.LabelFrame(main_frame, text="Communication Log", padding=10)
@@ -256,7 +298,7 @@ class PumpWindow:
     
     def start_dispense(self):
         """Start dispensing"""
-        if not self.is_connected:
+        if not self.is_connected or not self.serial_connection:
             return
         
         try:
@@ -287,7 +329,7 @@ class PumpWindow:
     
     def cancel_dispense(self):
         """Cancel current dispensing"""
-        if not self.is_connected:
+        if not self.is_connected or not self.serial_connection:
             return
         
         try:
@@ -299,7 +341,7 @@ class PumpWindow:
     
     def get_status(self):
         """Request status from Arduino"""
-        if not self.is_connected:
+        if not self.is_connected or not self.serial_connection:
             return
         
         try:
@@ -354,9 +396,34 @@ class PumpWindow:
                     self.dispense_btn.config(state="normal")
                     self.cancel_btn.config(state="disabled")
                     self.progress_bar['value'] = 0
+                    self.reset_progress_variables()
                     self.update_window_title()
         
+        elif message.startswith("PROGRESS_DETAILED:"):
+            # Parse detailed progress information
+            try:
+                parts = message[18:].split(',')  # Remove "PROGRESS_DETAILED: " prefix
+                if len(parts) >= 9:
+                    self.current_progress = float(parts[0])
+                    self.dispensed_volume = float(parts[1])
+                    self.remaining_volume = float(parts[2])
+                    self.elapsed_time = float(parts[3])
+                    self.estimated_remaining_time = float(parts[4])
+                    self.current_speed = float(parts[5])
+                    
+                    # Update GUI elements
+                    self.progress_bar['value'] = self.current_progress
+                    self.progress_var.set(f"Progress: {self.current_progress:.1f}%")
+                    self.dispensed_var.set(f"Dispensed: {self.dispensed_volume:.2f} mL")
+                    self.remaining_var.set(f"Remaining: {self.remaining_volume:.2f} mL")
+                    self.elapsed_var.set(f"Elapsed: {self.elapsed_time:.1f} min")
+                    self.remaining_time_var.set(f"ETA: {self.estimated_remaining_time:.1f} min")
+                    self.speed_var.set(f"Current: {self.current_speed:.1f} mL/min")
+            except (ValueError, IndexError) as e:
+                self.log_message(f"Error parsing detailed progress: {e}")
+        
         elif message.startswith("PROGRESS:"):
+            # Extract progress percentage (backward compatibility)
             try:
                 progress_part = message.split()[1]  # Get "XX.X%"
                 progress_value = float(progress_part.replace('%', ''))
@@ -371,11 +438,28 @@ class PumpWindow:
             self.cancel_btn.config(state="disabled")
             self.progress_bar['value'] = 0 if "CANCELLED" in message else 100
             self.progress_var.set(message.replace("_", " ").title())
+            self.reset_progress_variables()
             self.update_window_title()
             
             # Notify manager
             event_type = 'dispense_complete' if 'COMPLETE' in message else 'dispense_cancelled'
             self.manager_callback(event_type, self.pump_id, {})
+    
+    def reset_progress_variables(self):
+        """Reset all progress variables when dispensing stops"""
+        self.current_progress = 0.0
+        self.dispensed_volume = 0.0
+        self.remaining_volume = 0.0
+        self.elapsed_time = 0.0
+        self.estimated_remaining_time = 0.0
+        self.current_speed = 0.0
+        
+        # Update GUI elements
+        self.dispensed_var.set("Dispensed: 0.00 mL")
+        self.remaining_var.set("Remaining: 0.00 mL")
+        self.elapsed_var.set("Elapsed: 0.0 min")
+        self.remaining_time_var.set("ETA: 0.0 min")
+        self.speed_var.set("Current: 0.0 mL/min")
     
     def log_message(self, message):
         """Add message to log with timestamp"""
