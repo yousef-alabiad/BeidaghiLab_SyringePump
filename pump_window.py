@@ -279,7 +279,7 @@ class PumpWindow:
             return
         
         try:
-            self.serial_connection = serial.Serial(port, 9600, timeout=1)
+            self.serial_connection = serial.Serial(port, 115200, timeout=1)
             time.sleep(2)  # Wait for Arduino to initialize
             
             self.is_connected = True
